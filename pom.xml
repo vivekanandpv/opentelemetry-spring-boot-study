@@ -46,6 +46,23 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
+        <!-- Micrometer-based capture, bridged to the OTel SDK, exported via OTLP to the collector -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-opentelemetry</artifactId>
+        </dependency>
+        <!-- Bridges Logback log events into the OTel logs pipeline -->
+        <dependency>
+            <groupId>io.opentelemetry.instrumentation</groupId>
+            <artifactId>opentelemetry-logback-appender-1.0</artifactId>
+            <version>2.30.0-alpha</version>
+        </dependency>
+        <!-- Pinned to match the opentelemetry-sdk version above (1.62.0); avoids a NoClassDefFoundError from version skew -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api-incubator</artifactId>
+            <version>1.62.0-alpha</version>
+        </dependency>
 
         <dependency>
             <groupId>com.h2database</groupId>

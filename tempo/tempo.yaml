@@ -1,0 +1,42 @@
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    # Tempo's own OTLP receiver, separate from otel-collector's; reachable only inside the compose network
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      # pushes span-derived RED/service-graph metrics into the same Prometheus used for app metrics
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true # links generated metrics back to the originating trace
+
+overrides:
+  defaults:
+    metrics_generator:
+      # enables the metrics that power Grafana's trace-to-metrics and service graph views
+      processors: [service-graphs, span-metrics]
+      generate_native_histograms: both # keeps both classic and native histogram queries working
+
+# disables anonymous usage reporting to Grafana Labs
+usage_report:
+  reporting_enabled: false

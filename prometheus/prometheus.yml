@@ -1,0 +1,9 @@
+# app metrics arrive via remote-write from otel-collector; no scrape_config needed for them
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # self-monitoring: lets Prometheus's own health/performance show up in its data
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

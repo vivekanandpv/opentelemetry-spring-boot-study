@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <!-- a custom logback-spring.xml opts out of Boot's automatic structured-console switch,
+         so the encoder below is wired explicitly, reading the format from application.yaml -->
+    <springProperty name="consoleLogStructuredFormat" source="logging.structured.format.console"/>
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="org.springframework.boot.logging.logback.StructuredLogEncoder">
+            <format>${consoleLogStructuredFormat}</format>
+        </encoder>
+    </appender>
+
+    <appender name="OpenTelemetry" class="io.opentelemetry.instrumentation.logback.appender.v1_0.OpenTelemetryAppender">
+        <!-- off by default; without it, SLF4J's addKeyValue(...) fields reach the console JSON but not Loki -->
+        <captureKeyValuePairAttributes>true</captureKeyValuePairAttributes>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="OpenTelemetry"/>
+    </root>
+</configuration>

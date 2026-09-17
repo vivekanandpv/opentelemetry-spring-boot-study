@@ -7,6 +7,8 @@ import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.CustomerNo
 import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.DuplicateEmailException;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.mapper.CustomerMapper;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.repository.CustomerRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -15,6 +17,8 @@ import java.util.List;
 @Service
 @Transactional(readOnly = true)
 public class CustomerServiceImpl implements CustomerService {
+
+    private static final Logger log = LoggerFactory.getLogger(CustomerServiceImpl.class);
 
     private final CustomerRepository customerRepository;
     private final CustomerMapper customerMapper;
@@ -31,7 +35,11 @@ public class CustomerServiceImpl implements CustomerService {
             throw new DuplicateEmailException(request.email());
         }
         Customer customer = customerMapper.toEntity(request);
-        return customerMapper.toResponse(customerRepository.save(customer));
+        CustomerResponse response = customerMapper.toResponse(customerRepository.save(customer));
+        log.atInfo()
+                .addKeyValue("customerId", response.id())
+                .log("Customer created");
+        return response;
     }
 
     @Override
@@ -56,6 +64,9 @@ public class CustomerServiceImpl implements CustomerService {
                     throw new DuplicateEmailException(request.email());
                 });
         customerMapper.updateEntity(customer, request);
+        log.atInfo()
+                .addKeyValue("customerId", id)
+                .log("Customer updated");
         return customerMapper.toResponse(customer);
     }
 
@@ -63,6 +74,9 @@ public class CustomerServiceImpl implements CustomerService {
     @Transactional
     public void delete(Long id) {
         customerRepository.delete(findCustomerOrThrow(id));
+        log.atInfo()
+                .addKeyValue("customerId", id)
+                .log("Customer deleted");
     }
 
     private Customer findCustomerOrThrow(Long id) {

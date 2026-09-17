@@ -168,4 +168,15 @@ class CustomerControllerTest {
         mockMvc.perform(delete("/api/v1/customers/{id}", 99L))
                 .andExpect(status().isNotFound());
     }
+
+    @Test
+    void getById_shouldReturn500WithGenericMessage_whenAnUnexpectedExceptionEscapesTheService() throws Exception {
+        when(customerService.getById(1L)).thenThrow(new IllegalStateException("db-primary.internal refused connection"));
+
+        mockMvc.perform(get("/api/v1/customers/{id}", 1L))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.status").value(500))
+                .andExpect(jsonPath("$.message").value("An unexpected error occurred"))
+                .andExpect(jsonPath("$.message", org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("db-primary"))));
+    }
 }

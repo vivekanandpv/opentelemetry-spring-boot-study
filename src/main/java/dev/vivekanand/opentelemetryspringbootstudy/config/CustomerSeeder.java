@@ -40,7 +40,9 @@ public class CustomerSeeder implements CommandLineRunner {
     public void run(String... args) {
         long existingCount = customerRepository.count();
         if (existingCount > 0) {
-            log.info("Skipping customer seeding: {} customer(s) already present", existingCount);
+            log.atInfo()
+                    .addKeyValue("existingCount", existingCount)
+                    .log("Skipping customer seeding: customers already present");
             return;
         }
 
@@ -52,6 +54,8 @@ public class CustomerSeeder implements CommandLineRunner {
             customerRepository.save(new Customer(firstName, lastName, email, phone));
         }
 
-        log.info("Seeded {} dummy customers", CUSTOMER_COUNT);
+        log.atInfo()
+                .addKeyValue("seededCount", CUSTOMER_COUNT)
+                .log("Seeded dummy customers");
     }
 }

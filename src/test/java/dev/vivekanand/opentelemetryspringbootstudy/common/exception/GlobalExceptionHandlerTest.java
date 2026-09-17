@@ -66,4 +66,19 @@ class GlobalExceptionHandlerTest {
         assertThat(response.getBody().message()).isEqualTo("Validation failed");
         assertThat(response.getBody().details()).containsExactly("email: email must be a valid email address");
     }
+
+    @Test
+    void handleUnexpected_shouldReturn500WithGenericMessage_hidingTheRealExceptionDetail() {
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getRequestURI()).thenReturn("/api/v1/customers");
+
+        ResponseEntity<ApiError> response = handler.handleUnexpected(
+                new IllegalStateException("password=hunter2; connection to db-primary.internal refused"), request);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().message()).isEqualTo("An unexpected error occurred");
+        assertThat(response.getBody().message()).doesNotContain("password", "db-primary.internal");
+        assertThat(response.getBody().path()).isEqualTo("/api/v1/customers");
+    }
 }

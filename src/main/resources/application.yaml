@@ -18,3 +18,29 @@ spring:
     console:
       enabled: true
       path: /h2-console
+
+logging:
+  structured:
+    format:
+      # native Spring Boot structured (JSON) console logging, Elastic Common Schema
+      console: ecs
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+  opentelemetry:
+    resource-attributes:
+      deployment.environment: local
+    tracing:
+      export:
+        otlp:
+          endpoint: http://localhost:4318/v1/traces
+    logging:
+      export:
+        otlp:
+          endpoint: http://localhost:4318/v1/logs
+  otlp:
+    metrics:
+      export:
+        url: http://localhost:4318/v1/metrics

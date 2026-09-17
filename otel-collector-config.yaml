@@ -1,0 +1,45 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # groups telemetry before export instead of sending one request per record/span/metric
+  batch: {}
+
+exporters:
+  # traces -> Tempo's native OTLP gRPC receiver
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true # internal docker network traffic only, no TLS needed
+
+  # logs -> Loki's native OTLP ingestion endpoint; keeps trace_id/span_id as queryable structured metadata
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  # metrics -> Prometheus' remote-write receiver (push model; no scrape_config needed on the Prometheus side)
+  prometheus_remote_write:
+    endpoint: http://prometheus:9090/api/v1/write
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus_remote_write]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/loki]
