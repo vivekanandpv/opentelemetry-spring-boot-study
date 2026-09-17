@@ -58,17 +58,23 @@ exporters:
     tls:
       insecure: true
 
+  # all three signals -> SigNoz's own OTLP receiver, run as a second, independent backend alongside Tempo/Loki/Prometheus
+  otlp_grpc/signoz:
+    endpoint: ingester:4317
+    tls:
+      insecure: true
+
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, resource, attributes/scrub_url, probabilistic_sampler, batch]
-      exporters: [otlp_grpc/tempo]
+      exporters: [otlp_grpc/tempo, otlp_grpc/signoz]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, resource, batch]
-      exporters: [prometheus_remote_write]
+      exporters: [prometheus_remote_write, otlp_grpc/signoz]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, resource, filter/drop_framework_noise, batch]
-      exporters: [otlp_http/loki]
+      exporters: [otlp_http/loki, otlp_grpc/signoz]
