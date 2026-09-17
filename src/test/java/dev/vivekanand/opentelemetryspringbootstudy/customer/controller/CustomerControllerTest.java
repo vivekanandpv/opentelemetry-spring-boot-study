@@ -4,6 +4,7 @@ import dev.vivekanand.opentelemetryspringbootstudy.customer.dto.CustomerRequest;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.dto.CustomerResponse;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.CustomerNotFoundException;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.DuplicateEmailException;
+import dev.vivekanand.opentelemetryspringbootstudy.customer.metrics.CustomerMetrics;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.service.CustomerService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -39,6 +40,11 @@ class CustomerControllerTest {
 
     @MockitoBean
     private CustomerService customerService;
+
+    // GlobalExceptionHandler (a @RestControllerAdvice, so it's in-scope for this web slice) now depends on
+    // CustomerMetrics; the slice doesn't provide a real one, so it needs to be supplied here
+    @MockitoBean
+    private CustomerMetrics customerMetrics;
 
     private static final Instant TIMESTAMP = Instant.parse("2024-01-01T00:00:00Z");
 

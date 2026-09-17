@@ -2,6 +2,7 @@ package dev.vivekanand.opentelemetryspringbootstudy.common.exception;
 
 import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.CustomerNotFoundException;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.DuplicateEmailException;
+import dev.vivekanand.opentelemetryspringbootstudy.customer.metrics.CustomerMetrics;
 import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -14,11 +15,13 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class GlobalExceptionHandlerTest {
 
-    private final GlobalExceptionHandler handler = new GlobalExceptionHandler();
+    private final CustomerMetrics customerMetrics = mock(CustomerMetrics.class);
+    private final GlobalExceptionHandler handler = new GlobalExceptionHandler(customerMetrics);
 
     @Test
     void handleNotFound_shouldReturn404WithMessageAndPath() {
@@ -65,6 +68,7 @@ class GlobalExceptionHandlerTest {
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().message()).isEqualTo("Validation failed");
         assertThat(response.getBody().details()).containsExactly("email: email must be a valid email address");
+        verify(customerMetrics).recordValidationFailure(1);
     }
 
     @Test

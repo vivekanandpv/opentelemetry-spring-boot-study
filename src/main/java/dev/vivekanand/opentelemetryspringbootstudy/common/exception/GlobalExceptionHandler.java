@@ -2,6 +2,7 @@ package dev.vivekanand.opentelemetryspringbootstudy.common.exception;
 
 import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.CustomerNotFoundException;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.DuplicateEmailException;
+import dev.vivekanand.opentelemetryspringbootstudy.customer.metrics.CustomerMetrics;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +19,12 @@ import java.util.List;
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    private final CustomerMetrics customerMetrics;
+
+    public GlobalExceptionHandler(CustomerMetrics customerMetrics) {
+        this.customerMetrics = customerMetrics;
+    }
 
     @ExceptionHandler(CustomerNotFoundException.class)
     public ResponseEntity<ApiError> handleNotFound(CustomerNotFoundException ex, HttpServletRequest request) {
@@ -44,6 +51,7 @@ public class GlobalExceptionHandler {
                 .addKeyValue("path", request.getRequestURI())
                 .addKeyValue("violationCount", details.size())
                 .log("Validation failed");
+        customerMetrics.recordValidationFailure(details.size()); // async Counter tally + Histogram of violations-per-request
         return build(HttpStatus.BAD_REQUEST, "Validation failed", request, details);
     }
 

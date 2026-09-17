@@ -6,6 +6,7 @@ import dev.vivekanand.opentelemetryspringbootstudy.customer.entity.Customer;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.CustomerNotFoundException;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.DuplicateEmailException;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.mapper.CustomerMapper;
+import dev.vivekanand.opentelemetryspringbootstudy.customer.metrics.CustomerMetrics;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.repository.CustomerRepository;
 import io.micrometer.observation.tck.TestObservationRegistry;
 import io.micrometer.observation.tck.TestObservationRegistryAssert;
@@ -37,6 +38,9 @@ class CustomerServiceImplTest {
     @Mock
     private CustomerMapper customerMapper;
 
+    @Mock
+    private CustomerMetrics customerMetrics;
+
     private CustomerServiceImpl customerService;
     private TestObservationRegistry observationRegistry;
 
@@ -44,7 +48,7 @@ class CustomerServiceImplTest {
     void setUp() {
         // records real observations instead of discarding them, so span name/tag/error behavior is actually assertable
         observationRegistry = TestObservationRegistry.create();
-        customerService = new CustomerServiceImpl(customerRepository, customerMapper, observationRegistry);
+        customerService = new CustomerServiceImpl(customerRepository, customerMapper, observationRegistry, customerMetrics);
     }
 
     @Test
@@ -69,6 +73,9 @@ class CustomerServiceImplTest {
                 .hasBeenStarted()
                 .hasBeenStopped()
                 .hasHighCardinalityKeyValue("customer.id", "1");
+        verify(customerMetrics).recordCustomerCreated(1L);
+        verify(customerMetrics).beginMutation();
+        verify(customerMetrics).endMutation();
     }
 
     @Test
@@ -86,6 +93,11 @@ class CustomerServiceImplTest {
                 .hasObservationWithNameEqualTo("customer.create")
                 .that()
                 .hasError();
+        verify(customerMetrics).recordDuplicateEmailConflict();
+        verify(customerMetrics, never()).recordCustomerCreated(any());
+        // the in-flight bracket must still close even though the call failed
+        verify(customerMetrics).beginMutation();
+        verify(customerMetrics).endMutation();
     }
 
     @Test
@@ -161,6 +173,8 @@ class CustomerServiceImplTest {
                 .hasObservationWithNameEqualTo("customer.update")
                 .that()
                 .hasHighCardinalityKeyValue("customer.id", "1");
+        verify(customerMetrics).beginMutation();
+        verify(customerMetrics).endMutation();
     }
 
     @Test
@@ -188,6 +202,7 @@ class CustomerServiceImplTest {
                 .hasMessageContaining("taken@example.com");
 
         verify(customerMapper, never()).updateEntity(any(), any());
+        verify(customerMetrics).recordDuplicateEmailConflict();
     }
 
     @Test
@@ -218,6 +233,9 @@ class CustomerServiceImplTest {
                 .hasObservationWithNameEqualTo("customer.delete")
                 .that()
                 .hasHighCardinalityKeyValue("customer.id", "1");
+        verify(customerMetrics).recordCustomerDeleted();
+        verify(customerMetrics).beginMutation();
+        verify(customerMetrics).endMutation();
     }
 
     @Test
