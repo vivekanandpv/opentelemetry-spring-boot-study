@@ -7,7 +7,36 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
-  # groups telemetry before export instead of sending one request per record/span/metric
+  # refuses new data once memory crosses the limit instead of letting the collector OOM; must run first in every pipeline
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+
+  # tags everything passing through with a collector-level attribute, independent of what any one service sets itself
+  resource:
+    attributes:
+      - key: collector.name
+        value: otel-collector-local
+        action: upsert
+
+  # strips the raw request URL from spans; the templated route attribute already has what's needed, without the cardinality/PII risk of a raw URL
+  attributes/scrub_url:
+    actions:
+      - key: http.url
+        action: delete
+
+  # trims trace volume before export; 100 changes nothing here, but this is the dial you'd turn down in a busier, cost-sensitive environment
+  probabilistic_sampler:
+    sampling_percentage: 100
+
+  # drops routine framework startup/connection-pool chatter at the collector instead of paying to store logs nobody queries
+  filter/drop_framework_noise:
+    logs:
+      log_record:
+        - 'IsMatch(instrumentation_scope.name, "org\\.hibernate.*|com\\.zaxxer\\.hikari.*")'
+
+  # groups telemetry before export instead of sending one request per record/span/metric; must run last, right before the exporters
   batch: {}
 
 exporters:
@@ -33,13 +62,13 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch]
+      processors: [memory_limiter, resource, attributes/scrub_url, probabilistic_sampler, batch]
       exporters: [otlp_grpc/tempo]
     metrics:
       receivers: [otlp]
-      processors: [batch]
+      processors: [memory_limiter, resource, batch]
       exporters: [prometheus_remote_write]
     logs:
       receivers: [otlp]
-      processors: [batch]
+      processors: [memory_limiter, resource, filter/drop_framework_noise, batch]
       exporters: [otlp_http/loki]
