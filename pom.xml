@@ -79,6 +79,12 @@
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- TestObservationRegistry: records real observations instead of discarding them like NOOP, so span/tag assertions are possible -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-observation-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

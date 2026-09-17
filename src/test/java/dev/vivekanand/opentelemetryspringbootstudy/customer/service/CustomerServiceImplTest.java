@@ -7,9 +7,11 @@ import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.CustomerNo
 import dev.vivekanand.opentelemetryspringbootstudy.customer.exception.DuplicateEmailException;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.mapper.CustomerMapper;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.repository.CustomerRepository;
+import io.micrometer.observation.tck.TestObservationRegistry;
+import io.micrometer.observation.tck.TestObservationRegistryAssert;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -35,8 +37,15 @@ class CustomerServiceImplTest {
     @Mock
     private CustomerMapper customerMapper;
 
-    @InjectMocks
     private CustomerServiceImpl customerService;
+    private TestObservationRegistry observationRegistry;
+
+    @BeforeEach
+    void setUp() {
+        // records real observations instead of discarding them, so span name/tag/error behavior is actually assertable
+        observationRegistry = TestObservationRegistry.create();
+        customerService = new CustomerServiceImpl(customerRepository, customerMapper, observationRegistry);
+    }
 
     @Test
     void create_shouldSaveAndReturnResponse_whenEmailIsNotDuplicate() {
@@ -54,6 +63,12 @@ class CustomerServiceImplTest {
 
         assertThat(actual).isEqualTo(expectedResponse);
         verify(customerRepository).save(toSave);
+        TestObservationRegistryAssert.assertThat(observationRegistry)
+                .hasObservationWithNameEqualTo("customer.create")
+                .that()
+                .hasBeenStarted()
+                .hasBeenStopped()
+                .hasHighCardinalityKeyValue("customer.id", "1");
     }
 
     @Test
@@ -66,6 +81,11 @@ class CustomerServiceImplTest {
                 .hasMessageContaining("existing@example.com");
 
         verify(customerRepository, never()).save(any());
+        // confirms the span is marked errored rather than silently swallowing the failure
+        TestObservationRegistryAssert.assertThat(observationRegistry)
+                .hasObservationWithNameEqualTo("customer.create")
+                .that()
+                .hasError();
     }
 
     @Test
@@ -79,6 +99,10 @@ class CustomerServiceImplTest {
         CustomerResponse actual = customerService.getById(1L);
 
         assertThat(actual).isEqualTo(expectedResponse);
+        TestObservationRegistryAssert.assertThat(observationRegistry)
+                .hasObservationWithNameEqualTo("customer.get-by-id")
+                .that()
+                .hasHighCardinalityKeyValue("customer.id", "1");
     }
 
     @Test
@@ -104,6 +128,10 @@ class CustomerServiceImplTest {
         List<CustomerResponse> actual = customerService.getAll();
 
         assertThat(actual).containsExactly(firstResponse, secondResponse);
+        TestObservationRegistryAssert.assertThat(observationRegistry)
+                .hasObservationWithNameEqualTo("customer.get-all")
+                .that()
+                .hasHighCardinalityKeyValue("customer.count", "2");
     }
 
     @Test
@@ -129,6 +157,10 @@ class CustomerServiceImplTest {
 
         assertThat(actual).isEqualTo(expectedResponse);
         verify(customerMapper).updateEntity(existing, request);
+        TestObservationRegistryAssert.assertThat(observationRegistry)
+                .hasObservationWithNameEqualTo("customer.update")
+                .that()
+                .hasHighCardinalityKeyValue("customer.id", "1");
     }
 
     @Test
@@ -182,6 +214,10 @@ class CustomerServiceImplTest {
         customerService.delete(1L);
 
         verify(customerRepository, times(1)).delete(existing);
+        TestObservationRegistryAssert.assertThat(observationRegistry)
+                .hasObservationWithNameEqualTo("customer.delete")
+                .that()
+                .hasHighCardinalityKeyValue("customer.id", "1");
     }
 
     @Test

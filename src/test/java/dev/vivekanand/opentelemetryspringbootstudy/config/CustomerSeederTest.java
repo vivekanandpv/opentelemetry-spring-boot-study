@@ -2,10 +2,12 @@ package dev.vivekanand.opentelemetryspringbootstudy.config;
 
 import dev.vivekanand.opentelemetryspringbootstudy.customer.entity.Customer;
 import dev.vivekanand.opentelemetryspringbootstudy.customer.repository.CustomerRepository;
+import io.micrometer.observation.tck.TestObservationRegistry;
+import io.micrometer.observation.tck.TestObservationRegistryAssert;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -26,8 +28,14 @@ class CustomerSeederTest {
     @Mock
     private CustomerRepository customerRepository;
 
-    @InjectMocks
     private CustomerSeeder customerSeeder;
+    private TestObservationRegistry observationRegistry;
+
+    @BeforeEach
+    void setUp() {
+        observationRegistry = TestObservationRegistry.create();
+        customerSeeder = new CustomerSeeder(customerRepository, observationRegistry);
+    }
 
     @Test
     void run_shouldSeedExactlyOneHundredCustomers_whenRepositoryIsEmpty() {
@@ -36,6 +44,12 @@ class CustomerSeederTest {
         customerSeeder.run();
 
         verify(customerRepository, times(100)).save(any(Customer.class));
+        // confirms this background job gets its own root span, since it never runs inside an HTTP request
+        TestObservationRegistryAssert.assertThat(observationRegistry)
+                .hasObservationWithNameEqualTo("customer.seed")
+                .that()
+                .hasBeenStarted()
+                .hasBeenStopped();
     }
 
     @Test
@@ -45,6 +59,8 @@ class CustomerSeederTest {
         customerSeeder.run();
 
         verify(customerRepository, never()).save(any(Customer.class));
+        // the span sits inside the "not already seeded" branch, so skipping should record nothing at all
+        TestObservationRegistryAssert.assertThat(observationRegistry).doesNotHaveAnyObservation();
     }
 
     @Test
