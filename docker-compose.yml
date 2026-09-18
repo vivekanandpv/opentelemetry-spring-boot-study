@@ -12,7 +12,7 @@ services:
       - tempo
       - loki
       - prometheus
-      - signoz # SigNoz's own OTLP receiver, exported to in parallel with Tempo/Loki/Prometheus
+      - ingester # SigNoz's own OTLP receiver, exported to in parallel with Tempo/Loki/Prometheus
 
   prometheus:
     image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
@@ -66,29 +66,183 @@ services:
       - loki
       - tempo
 
-  # SigNoz: a second, independent observability backend fed by the same otel-collector.
-  # This is the same five SigNoz processes (ClickHouse, ClickHouse Keeper, the OTLP ingester, the UI)
-  # as a hand-assembled multi-container setup, just packed into one image and managed by systemd inside
-  # it instead of by docker-compose - hence --privileged, which systemd needs to run inside the container.
-  # See docs/signoz-integration.md for the trade-offs of this image versus the multi-container form.
-  signoz:
-    image: signoz/signoz-standalone:v0.0.4@sha256:2b80f2188434b8910777edeb431d13ea1315dbcb30e6aa6ec705fc3405f113be
-    container_name: signoz-standalone
-    privileged: true # required: this image runs systemd internally to manage its bundled ClickHouse/ingester/UI processes
-    # note: docker-level `environment:` here does NOT reach the systemd-managed processes inside (see docs/signoz-integration.md) -
-    # the JWT-secret security warning in this image's logs is a known, currently unavoidable cosmetic issue of this packaging
+  # --- SigNoz: a second, independent observability backend fed by the same otel-collector ---
+  # This mirrors the multi-container architecture SigNoz's own Foundry installer generates (the
+  # `signoz/signoz-standalone` all-in-one image used earlier is deprecated and no longer maintained).
+  # ClickHouse Keeper replaces Zookeeper as SigNoz's coordination store in current releases
+  signoz-telemetrykeeper-clickhousekeeper-0:
+    image: clickhouse/clickhouse-keeper:25.12.5@sha256:525b8b0f93ccb371131c46f22a066ea43d33d74aba314203e8044609945d8524
+    container_name: signoz-telemetrykeeper-clickhousekeeper-0
+    entrypoint: ["/usr/bin/clickhouse-keeper", "--config-file=/etc/clickhouse-keeper/keeper.yaml"]
+    healthcheck:
+      test: ["CMD", "clickhouse-keeper-client", "-h", "localhost", "-p", "9181", "-q", "ls"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     volumes:
-      - signoz_clickhouse_data:/var/lib/clickhouse
-      - signoz_app_data:/var/lib/signoz
+      - signoz_telemetrykeeper_data:/var/lib/clickhouse-keeper
+      - ./signoz/telemetrykeeper/keeper-0.yaml:/etc/clickhouse-keeper/keeper.yaml:ro
+
+  # one-shot job: fetches the histogramQuantile UDF binary ClickHouse needs for SigNoz's own dashboards
+  signoz-telemetrystore-clickhouse-user-scripts:
+    image: clickhouse/clickhouse-server:25.12.5@sha256:cacf32d6884291dc2ff5e0156a97f46fc53ff7c929a7906d114e268a929dfd3a
+    container_name: signoz-telemetrystore-clickhouse-user-scripts
+    restart: on-failure
+    command:
+      - bash
+      - -c
+      - |-
+        version="v0.0.1"
+        node_os=$$(uname -s | tr '[:upper:]' '[:lower:]')
+        node_arch=$$(uname -m | sed s/aarch64/arm64/ | sed s/x86_64/amd64/)
+        cd /tmp
+        wget -O histogram-quantile.tar.gz "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F$${version}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz"
+        tar -xvzf histogram-quantile.tar.gz
+        mv histogram-quantile /var/lib/clickhouse/user_scripts/histogramQuantile
+    volumes:
+      - signoz_telemetrystore_user_scripts:/var/lib/clickhouse/user_scripts
+
+  # the actual telemetry store: all traces/logs/metrics SigNoz ingests end up here
+  signoz-telemetrystore-clickhouse-0-0:
+    image: clickhouse/clickhouse-server:25.12.5@sha256:cacf32d6884291dc2ff5e0156a97f46fc53ff7c929a7906d114e268a929dfd3a
+    container_name: signoz-telemetrystore-clickhouse-0-0
+    environment:
+      - CLICKHOUSE_SKIP_USER_SETUP=1
+      - CLICKHOUSE_CONFIG=/etc/clickhouse-server/config-0-0.yaml
+    depends_on:
+      signoz-telemetrykeeper-clickhousekeeper-0:
+        condition: service_healthy
+      signoz-telemetrystore-clickhouse-user-scripts:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - signoz_telemetrystore_data:/var/lib/clickhouse
+      - signoz_telemetrystore_user_scripts:/var/lib/clickhouse/user_scripts:ro
+      - ./signoz/telemetrystore/config-0-0.yaml:/etc/clickhouse-server/config-0-0.yaml:ro
+      - ./signoz/telemetrystore/functions.yaml:/etc/clickhouse-server/functions.yaml:ro
+
+  # one-shot job: creates/upgrades the ClickHouse schema SigNoz's ingester and UI both depend on
+  signoz-telemetrystore-migrator:
+    image: signoz/signoz-otel-collector:v0.144.10@sha256:34ecb436b687cc23bef5f706904cdf005998ca4ebe543653a634055a9fe204f6
+    container_name: signoz-telemetrystore-migrator
+    restart: on-failure
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate ready &&
+        /signoz-otel-collector migrate bootstrap &&
+        /signoz-otel-collector migrate sync up &&
+        /signoz-otel-collector migrate async up
+    environment:
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://signoz-telemetrystore-clickhouse-0-0:9000
+      - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
+    depends_on:
+      signoz-telemetrystore-clickhouse-0-0:
+        condition: service_healthy
+
+  # metadata store for SigNoz's own app state (users, dashboards, alert rules) - separate from the telemetry data itself
+  signoz-metastore-postgres-0:
+    image: postgres:16@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
+    container_name: signoz-metastore-postgres-0
+    environment:
+      - POSTGRES_DB=signoz
+      - POSTGRES_USER=signoz
+      - POSTGRES_PASSWORD=signoz
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signoz -d signoz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - signoz_metastore_data:/var/lib/postgresql/data
+
+  # the SigNoz web UI and query API, a single unified binary as of current releases
+  signoz:
+    image: signoz/signoz:v0.142.1@sha256:49501b04d77a1e8328d31519c977dd4503b724c74425764a3ab83768db3ee8ff
+    container_name: signoz-signoz-0
+    environment:
+      - SIGNOZ_SQLSTORE_PROVIDER=postgres
+      - SIGNOZ_SQLSTORE_POSTGRES_DSN=postgres://signoz:signoz@signoz-metastore-postgres-0:5432/signoz?sslmode=disable
+      - SIGNOZ_TELEMETRYSTORE_PROVIDER=clickhouse
+      - SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN=tcp://signoz-telemetrystore-clickhouse-0-0:9000
+      - SIGNOZ_TOKENIZER_JWT_SECRET=${SIGNOZ_JWT_SECRET:-local-dev-only-change-me} # a real container now, unlike the old standalone image - this env var actually reaches the process
+    depends_on:
+      signoz-metastore-postgres-0:
+        condition: service_healthy
+      signoz-telemetrystore-migrator:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    ports:
+      - "8081:8080" # remapped from 8080 - the Spring Boot app itself already owns that port on the host
+
+  # one-shot job: SigNoz refuses to start its ingester's OTLP receiver until an admin org exists, so this
+  # auto-registers one on every `docker compose up` instead of requiring a manual first-run UI signup.
+  # Exit 400 (org already exists) is treated as success, so this is safe and idempotent on every startup.
+  signoz-bootstrap:
+    image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+    container_name: signoz-bootstrap
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        code=$$(curl -s -o /dev/null -w '%{http_code}' -X POST http://signoz-signoz-0:8080/api/v1/register \
+          -H 'Content-Type: application/json' \
+          -d '{"name":"Demo Admin","orgDisplayName":"otel-study","orgName":"otel-study","email":"user@company.com","password":"SignozDemo123!"}')
+        if [ "$$code" = "200" ] || [ "$$code" = "400" ]; then
+          echo "SigNoz org ready (HTTP $$code)"
+          exit 0
+        fi
+        echo "Unexpected response from SigNoz register endpoint: HTTP $$code"
+        exit 1
+    depends_on:
+      signoz:
+        condition: service_healthy
+    restart: "no"
+
+  # SigNoz's own OTLP receiver; our app-facing otel-collector forwards a duplicate copy of every signal here
+  ingester:
+    image: signoz/signoz-otel-collector:v0.144.10@sha256:34ecb436b687cc23bef5f706904cdf005998ca4ebe543653a634055a9fe204f6
+    container_name: signoz-ingester
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate sync check &&
+        /signoz-otel-collector --config=/etc/otel-collector-config.yaml --manager-config=/etc/opamp-config.yaml --copy-path=/var/tmp/collector-config.yaml
+    environment:
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://signoz-telemetrystore-clickhouse-0-0:9000
+      - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
+      - LOW_CARDINAL_EXCEPTION_GROUPING=false
+    depends_on:
+      signoz-telemetrystore-migrator:
+        condition: service_completed_successfully
+      signoz-bootstrap:
+        condition: service_completed_successfully
     ports:
       - "5317:4317" # remapped from 4317 - the app-facing otel-collector already owns that port on the host
       - "5318:4318"
-      - "8081:8080" # remapped from 8080 - the Spring Boot app itself already owns that port on the host
+    volumes:
+      - ./signoz/ingester/ingester.yaml:/etc/otel-collector-config.yaml:ro
+      - ./signoz/ingester/opamp.yaml:/etc/opamp-config.yaml:ro
 
 volumes:
   prometheus_data:
   loki_data:
   tempo_data:
   grafana_data:
-  signoz_clickhouse_data:
-  signoz_app_data:
+  signoz_telemetrykeeper_data:
+  signoz_telemetrystore_data:
+  signoz_telemetrystore_user_scripts:
+  signoz_metastore_data:

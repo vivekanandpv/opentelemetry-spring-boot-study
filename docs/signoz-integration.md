@@ -21,78 +21,112 @@ all three pipelines. Nothing about how the app is instrumented changed at
 all; this is purely a collector-side decision to send a duplicate copy of
 everything somewhere else.
 
-SigNoz itself runs as a single container in
-[`docker-compose.yml`](../docker-compose.yml), the
-`signoz/signoz-standalone` image, pinned to a specific tag and content
-digest the same way the rest of this project's stack is. It's worth being
-precise about what "single container" actually means here, because it
-isn't a smaller deployment — it's the same deployment, repackaged.
+SigNoz runs as seven services in [`docker-compose.yml`](../docker-compose.yml),
+mirroring the architecture SigNoz's own official installer (a tool called
+Foundry) generates today, all images pinned to a specific tag and content
+digest the same way the rest of this project's stack is:
 
-### What's actually inside the one container
+- **`signoz-telemetrykeeper-clickhousekeeper-0`** — ClickHouse Keeper,
+  which replaced ZooKeeper as ClickHouse's coordination store in current
+  releases.
+- **`signoz-telemetrystore-clickhouse-0-0`** — the actual telemetry
+  database. Every trace, log, and metric SigNoz ingests ends up in
+  ClickHouse tables, not a purpose-built time-series or trace store the way
+  Tempo and Prometheus are. A short-lived companion container
+  (`signoz-telemetrystore-clickhouse-user-scripts`) fetches a small helper
+  binary ClickHouse needs for one of SigNoz's own dashboard functions, then
+  exits.
+- **`signoz-metastore-postgres-0`** — a small Postgres instance holding
+  SigNoz's own application state: user accounts, dashboards, alert rules.
+  This is metadata about the tool, not telemetry data.
+- **`signoz-signoz-0`** — the web UI and query API, a single unified
+  binary in current SigNoz releases rather than the separate
+  frontend-plus-query-service split of a couple of years ago.
+- **`signoz-ingester`** (`signoz/signoz-otel-collector`) — SigNoz's own
+  OTLP receiver. This is a fork of the same otel-collector this project
+  already uses, built with ClickHouse-writing exporters instead of the
+  generic ones. It listens on 5317/5318 on the host (remapped from the
+  standard 4317/4318, since this project's main collector already owns
+  those ports) and on 4317/4318 inside the Docker network, which is what
+  the app-facing collector actually talks to. A one-shot migration job
+  (`signoz-telemetrystore-migrator`) sets up ClickHouse's schema before
+  this starts.
+- **`signoz-bootstrap`** — a small one-shot container, covered in its own
+  section below, that solves the single biggest point of friction in
+  running SigNoz locally: the account it needs to exist before it'll do
+  anything.
 
-An earlier pass at this integration ran SigNoz the way its own official
-Foundry-generated deployment does: five separate containers — ClickHouse,
-ClickHouse Keeper (ZooKeeper's replacement as ClickHouse's coordination
-store), Postgres for SigNoz's own app metadata, SigNoz's OTLP-ingesting
-otel-collector fork, and the unified UI/query binary — each independently
-visible in `docker compose ps`, restartable on its own, and never needing
-anything more privileged than a normal container.
+## Why this replaced a single all-in-one container
 
-Opening up `signoz-standalone` shows the exact same five processes,
-confirmed by reading its internal systemd unit files
-(`signoz-ingester.service`, `signoz-signoz.service`, two ClickHouse-related
-units, and a migration job) — just managed by systemd running *inside* this
-one container instead of by docker-compose running five containers. That's
-why `privileged: true` is non-negotiable here: it failed to boot at all
-without it during testing, because systemd needs that level of host access
-to manage processes the way it normally would on a real machine. The
-resource footprint underneath is identical either way; what changes is
-whether you see one `docker ps` row or five, and whether the pieces can be
-restarted independently.
+An earlier version of this integration ran SigNoz as one container —
+`signoz/signoz-standalone`, which bundled ClickHouse, its coordination
+store, and SigNoz's own backend into a single privileged image running
+systemd internally to manage all of it. It worked, with real caveats
+(documented at the time: an older, separately-maintained SigNoz version,
+a JWT secret warning that couldn't be silenced because Docker's
+`environment:` never reached the systemd-managed processes inside).
 
-One genuine simplification did come with the swap: this image uses SQLite
-for SigNoz's own metadata instead of Postgres, which is a real reduction
-from six moving parts (five persistent services plus a migration job) to
-five, not just a visual one. The other trade-offs run the other way. This
-build tracks an older SigNoz release (`v0.117.1`) than the multi-container
-Foundry-generated setup would give you (`v0.142.1` at the time both were
-checked) — it's a separately maintained build that isn't kept in lockstep
-with SigNoz's main release train. And because systemd inside the container
-owns its own hardcoded environment for each service (visible directly in
-its unit files), there's no way to pass configuration into it through
-Docker's normal `environment:` mechanism — confirmed by setting
-`SIGNOZ_TOKENIZER_JWT_SECRET` at the container level and finding it never
-reached the process, which still logs a security warning about the missing
-secret with no way to quiet it from outside. For a local demo that warning
-is cosmetic; it would matter more anywhere the container needs to be
-configured after the fact.
+What forced the replacement wasn't any of those caveats — it was hitting
+two real failures trying to run that same image on a different machine.
+First: SigNoz's registration endpoint refused with `"self-registration is
+disabled"`, which turned out to be entirely by design — reading SigNoz's
+own source (`pkg/query-service/app/http_handler.go`) showed the endpoint
+permanently locks itself the moment any account is created, precisely so
+a network-exposed instance can't let a stranger register as the org
+owner. That's correct behavior; it just meant the standalone container's
+volume on that other machine wasn't actually the clean slate it looked
+like. Second, and more serious: the ingester process inside that same
+container kept failing to start, its pre-start migration check looping
+on `connection refused` against ClickHouse until systemd gave up
+entirely — ClickHouse, bundled in that same privileged container, simply
+hadn't finished starting in time, something that showed up on one machine
+and not the other. Both problems trace back to the same root cause:
+running an entire multi-process backend inside one container, coordinated
+by systemd instead of by a proper orchestrator, is exactly the kind of
+setup where startup ordering and first-boot timing quietly stop being
+guaranteed the moment you're not on the exact machine it was built and
+tested on.
 
-None of the plumbing here — image names, ports, the fact that `--privileged`
-is genuinely required rather than a copy-paste habit — came from guessing.
-The multi-container comparison came from SigNoz's own Foundry deployment
-generator; the internals of the standalone image came from actually
-starting it and reading its systemd units and logs directly, the same way
-everything else in this project gets verified before being written down.
+The multi-container form used now is what SigNoz's own installer produces,
+which means startup ordering is expressed the way Docker Compose is
+actually built to express it — explicit `depends_on` conditions with real
+health checks — rather than implicitly, inside systemd units nothing
+outside the container can see or influence.
 
-## The one manual step: creating the first account
+## The bootstrap step, now automatic
 
-The one piece that isn't just "start the container and it works" is that
-SigNoz refuses to hand its own otel-collector fork a working configuration
-until an organization exists — true of both the multi-container and
-standalone forms, since they're running the same code. This showed up
-directly during verification: the bundled ingester's health-check extension
-came up immediately and logged "Everything is ready," but its actual OTLP
-receiver never bound to a port, because SigNoz's otel-collector fork runs in
-a managed mode where the real pipeline configuration is pushed to it over a
-protocol called OpAMP by the SigNoz backend — and the backend was refusing
-that handshake with `cannot create agent without orgId`. The fix is a single
-API call, `POST /api/v1/register`, creating the first admin account and its
-organization. The moment that account exists, the ingester's OpAMP client
-reconnects, receives real pipeline configuration, and its OTLP receiver
-comes up within seconds. This is a one-time bootstrap step for a fresh
-SigNoz deployment, not something you'd hit again once an account exists —
-but it's the kind of dependency that's invisible from the compose file
-alone, which is exactly why it's worth writing down.
+Self-hosted SigNoz always requires an admin account before its ingester
+will accept data — not a bug, not something to turn off, just how the
+product is designed. Every earlier version of this document walked
+through running that registration by hand, and the entire previous
+back-and-forth that led to this rewrite was, in the end, about that one
+manual step not traveling well between machines.
+
+`signoz-bootstrap` removes the manual step entirely. It's a small
+container that runs once, after the SigNoz backend is confirmed healthy,
+and does exactly this:
+
+```bash
+curl -X POST http://signoz-signoz-0:8080/api/v1/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Demo Admin","orgDisplayName":"otel-study","orgName":"otel-study","email":"user@company.com","password":"SignozDemo123!"}'
+```
+
+If that call returns `200`, the org didn't exist yet and now it does. If
+it returns `400`, the org already exists — which, given what's now known
+about that endpoint's design, is the *expected* outcome on every
+`docker compose up` after the first one, not an error condition. The
+bootstrap container treats both as success and exits `0`; only a genuinely
+unexpected response fails the container, which would in turn block the
+ingester from starting, surfacing the problem immediately instead of
+silently.
+
+This is the actual fix for the cross-machine login problem: the account
+isn't something anyone has to remember to create anymore, on this machine
+or any other. Clone the repository, run `docker compose up -d`, and by the
+time the stack finishes starting, the org and the admin account already
+exist — verified end to end, including on a fresh set of volumes with
+nothing pre-existing.
 
 ## What's actually different from Grafana plus separate backends
 
@@ -182,20 +216,20 @@ since this app already owns that port on the host). Log in with:
 - **Email:** `user@company.com`
 - **Password:** `SignozDemo123!`
 
-These are demo-only credentials for a local, non-production account with no
-real data of consequence behind it, kept in plain text here deliberately so
-there's nothing extra to remember. The browser session survives container
-restarts (verified directly - a token issued before a restart still worked
-afterward), so this login is a one-time thing in normal use, not something
-you'll be asked for repeatedly.
+Unlike every earlier version of this document, these credentials are
+genuinely portable now — not a snapshot of one machine's local state.
+`signoz-bootstrap` creates this exact account automatically on every
+`docker compose up`, on any machine, from a clean clone or an existing
+one. There's nothing to run by hand and nothing that only works where it
+was first set up.
 
 A concrete way to see both agree: query `customer.repository.count`
 (SigNoz) and `customer_repository_count{job="opentelemetry-spring-boot-study"}`
 (Prometheus/Grafana) after a load test. During verification both reported
-`1923` — the same live database row count, computed independently by two
-completely different storage and query engines, from two copies of the
-same OTLP stream. That agreement is the actual proof this integration
-works, not just that both UIs load.
+the exact same number, computed independently by two completely different
+storage and query engines, from two copies of the same OTLP stream. That
+agreement is the actual proof this integration works, not just that both
+UIs load.
 
 ## Best practices
 
@@ -213,17 +247,19 @@ backend exists. That's the entire value of standardizing on OTLP in the
 first place — swapping or adding a backend is a collector config change,
 never an application redeploy.
 
-Pin everything, including a "latest"-tagged image. `signoz/signoz-standalone:latest`
-resolved to a real, dated version tag at pull time (`v0.0.4`) — that
-resolved tag and digest are what's actually pinned in the compose file, not
-the floating `latest` tag itself.
+Automate the parts of a first-run setup that would otherwise be a manual
+step someone has to remember. `signoz-bootstrap` is the concrete example:
+turning "log in and register an account" from a step in a README into an
+idempotent container that runs on every startup and treats "already done"
+as success is what actually made this deployment portable across
+machines, not any amount of documentation explaining the manual step
+better.
 
-Weigh `privileged: true` deliberately, not reflexively. It's a real
-capability grant to the container, not a formality — confirmed here by the
-container failing to boot at all without it, since it needs to run systemd
-internally. Copying a compose snippet that includes it is fine once you
-know why it's there; copying it without checking is how a lab convenience
-turns into a habit you regret somewhere it matters more.
+Pin everything, including a "latest"-tagged image. Every `:latest` image
+in this stack — `signoz/signoz`, `signoz/signoz-otel-collector`,
+`curlimages/curl` — resolved to a real, dated version tag at pull time;
+those resolved tags and digests are what's actually pinned in the compose
+file, not the floating `latest` tag itself.
 
 ## Antipatterns
 
@@ -240,12 +276,20 @@ transport and the data model's shape; it does not standardize what a given
 backend chooses to do with every field in that model once it arrives. This
 project's own exemplar findings are the proof.
 
+Don't treat a working setup on one machine as proof it'll work on another.
+The standalone container ran without issue for a long stretch of testing
+before a second machine turned up both the registration lockout and the
+ClickHouse startup race — neither of which had anything to do with the
+config being wrong, and everything to do with timing and state that only
+differ once you leave the machine something was first verified on.
+
 Don't skip verifying against the platform's actual storage or source when
-a claim matters. The `cannot create agent without orgId` failure and the
-missing exemplar columns were both found by checking real logs and a real
-schema, not by reading what SigNoz's marketing page says it does. That
-gap between "should work" and "does work" is exactly where the real
-learning happened in this integration, and it's the same discipline this
+a claim matters. The registration lockout, the ClickHouse startup race,
+and the missing exemplar columns were all found by checking real logs, a
+real schema, or the vendor's actual source — never by reading what a
+feature page or a first successful run seemed to imply. That gap between
+"worked once" and "works reliably" is exactly where the real learning
+happened across this integration, and it's the same discipline this
 project's other documents (particularly
 [otel-collector-processors.md](otel-collector-processors.md)) have applied
 throughout.

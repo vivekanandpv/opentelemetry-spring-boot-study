@@ -60,7 +60,7 @@ exporters:
 
   # all three signals -> SigNoz's own OTLP receiver, run as a second, independent backend alongside Tempo/Loki/Prometheus
   otlp_grpc/signoz:
-    endpoint: signoz:4317
+    endpoint: ingester:4317
     tls:
       insecure: true
 
