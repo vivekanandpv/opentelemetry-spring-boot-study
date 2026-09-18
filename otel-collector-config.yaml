@@ -26,9 +26,32 @@ processors:
       - key: http.url
         action: delete
 
-  # trims trace volume before export; 100 changes nothing here, but this is the dial you'd turn down in a busier, cost-sensitive environment
-  probabilistic_sampler:
-    sampling_percentage: 100
+  # HEAD-BASED sampling: decides per-trace, at the very start, before any span exists - cheap and stateless, but blind to
+  # how the trace turns out (an error and a boring success are equally likely to be kept). Commented out in favor of
+  # tail_sampling below; flip this back on and comment out tail_sampling to compare the two strategies directly.
+  # probabilistic_sampler:
+  #   sampling_percentage: 20
+
+  # TAIL-BASED sampling: buffers each trace's spans until it completes (or 10s passes), then decides using what actually
+  # happened - always keeps error responses and slow requests in full, and probabilistically thins out the rest.
+  tail_sampling:
+    decision_wait: 10s # how long to buffer a trace's spans before deciding; must exceed how long this app's traces take to finish
+    num_traces: 50000 # in-memory buffer capacity across all traces currently being decided on
+    expected_new_traces_per_sec: 50
+    policies:
+      - name: keep-errors
+        type: string_attribute
+        string_attribute:
+          key: status # the HTTP status attribute Micrometer's WebMvc observation sets on the root span
+          values: ["400", "404", "409", "500"]
+      - name: keep-slow
+        type: latency
+        latency:
+          threshold_ms: 50 # generous for this app's normal sub-10ms responses; still low enough to catch real contention
+      - name: sample-the-rest
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 20 # everything that isn't an error or slow: keep a representative 1-in-5 slice
 
   # drops routine framework startup/connection-pool chatter at the collector instead of paying to store logs nobody queries
   filter/drop_framework_noise:
@@ -68,7 +91,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, resource, attributes/scrub_url, probabilistic_sampler, batch]
+      processors: [memory_limiter, resource, attributes/scrub_url, tail_sampling, batch]
       exporters: [otlp_grpc/tempo, otlp_grpc/signoz]
     metrics:
       receivers: [otlp]
