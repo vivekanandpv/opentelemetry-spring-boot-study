@@ -26,6 +26,58 @@ processors:
       - key: http.url
         action: delete
 
+  # PSEUDONYMIZATION: one-way SHA1 hash of the customer id wherever it appears, on spans and on logs - keeps the value
+  # joinable across a single trace/session without exposing the raw database identifier to either storage backend
+  attributes/hash_customer_id:
+    actions:
+      - key: customer.id
+        action: hash
+      - key: customerId
+        action: hash
+
+  # SURGICAL REDACTION via OTTL: reaches into places attributes/redaction processors can't - span EVENT attributes, the
+  # span's own status message, and the log body itself - masking any email-shaped substring wherever it's hiding
+  transform/redact_pii:
+    error_mode: ignore
+    trace_statements:
+      - replace_pattern(spanevent.attributes["exception.message"], "[\\w.+-]+@[\\w-]+\\.[a-zA-Z]{2,}", "[REDACTED_EMAIL]") where spanevent.name == "exception"
+      - replace_pattern(spanevent.attributes["exception.stacktrace"], "[\\w.+-]+@[\\w-]+\\.[a-zA-Z]{2,}", "[REDACTED_EMAIL]") where spanevent.name == "exception"
+      - replace_pattern(span.status.message, "[\\w.+-]+@[\\w-]+\\.[a-zA-Z]{2,}", "[REDACTED_EMAIL]") # the OTel Status object's own message - separate from both attributes and events, easy to miss
+    log_statements:
+      - replace_pattern(log.body, "[\\w.+-]+@[\\w-]+\\.[a-zA-Z]{2,}", "[REDACTED_EMAIL]") # dormant today (DEBUG logging is off) but future-proofs the log body regardless
+
+  # LAST LINE OF DEFENSE: only these span/log attribute keys are allowed through at all - anything unexpected (a future
+  # dev accidentally attaching a raw email/name/phone as a new attribute) gets stripped entirely, not just missed
+  redaction:
+    allow_all_keys: false
+    allowed_keys:
+      # resource-level: without these, the allow-list strips them too, and Tempo/SigNoz lose the ability to identify the service at all
+      - service.name
+      - collector.name
+      - deployment.environment
+      - telemetry.sdk.language
+      - telemetry.sdk.name
+      - telemetry.sdk.version
+      # span-level
+      - exception
+      - uri
+      - method
+      - outcome
+      - status
+      - customer.id
+      - customer.count
+      - customerId
+      - path
+      - violationCount
+      - exceptionType
+      # span EVENT attributes - kept so transform/redact_pii's in-place email redaction above stays visible instead of the whole field vanishing
+      - exception.type
+      - exception.message
+      - exception.stacktrace
+    blocked_values:
+      - "[\\w.+-]+@[\\w-]+\\.[a-zA-Z]{2,}" # catches an email-shaped value even on an allowed key
+    summary: info
+
   # HEAD-BASED sampling: decides per-trace, at the very start, before any span exists - cheap and stateless, but blind to
   # how the trace turns out (an error and a boring success are equally likely to be kept). Commented out in favor of
   # tail_sampling below; flip this back on and comment out tail_sampling to compare the two strategies directly.
@@ -91,7 +143,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, resource, attributes/scrub_url, tail_sampling, batch]
+      processors: [memory_limiter, resource, attributes/scrub_url, attributes/hash_customer_id, transform/redact_pii, redaction, tail_sampling, batch]
       exporters: [otlp_grpc/tempo, otlp_grpc/signoz]
     metrics:
       receivers: [otlp]
@@ -99,5 +151,5 @@ service:
       exporters: [prometheus_remote_write, otlp_grpc/signoz]
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, resource, filter/drop_framework_noise, batch]
+      processors: [memory_limiter, resource, filter/drop_framework_noise, attributes/hash_customer_id, transform/redact_pii, redaction, batch]
       exporters: [otlp_http/loki, otlp_grpc/signoz]
